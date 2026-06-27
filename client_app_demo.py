@@ -49,6 +49,25 @@ st.markdown(
     "Korea's Green Investment, Fiscal Sustainability, and NDC Compliance Analysis"
 )
 
+with st.expander("📚 References — peer-reviewed research & policy work",
+                 expanded=True):
+    st.markdown(
+        "- Jin, I. (2024). *Emission Prediction, Global Stocktake, and NDC "
+        "Update: CO-STIRPAT Dynamic System.* Green and Low-Carbon Economy, "
+        "3(3), 213–219. "
+        "[doi:10.47852/bonviewGLCE42022058]"
+        "(https://doi.org/10.47852/bonviewGLCE42022058)\n"
+        "- Jin, I. (2025). *Aligning green budgeting with nationally "
+        "determined contributions.* Climate Policy, 26(2), 1–14. "
+        "[doi:10.1080/14693062.2025.2502108]"
+        "(https://doi.org/10.1080/14693062.2025.2502108)\n"
+        "- Jin, I. (2026). *Fiscal Costs-Benefits of Responding to Extreme "
+        "Weather Damage: Extended Climate Budget Tool Based on OECD EDISON.* "
+        "4th NABO–OECD Annual Conference of Asian PBOs. "
+        "[doi:10.13140/RG.2.2.33492.77443]"
+        "(https://doi.org/10.13140/RG.2.2.33492.77443)"
+    )
+
 
 # ---------------------------------------------------------------------------
 # API call (the only thing this client does besides drawing)
