@@ -52,6 +52,11 @@ st.markdown(
 with st.expander("📚 References — peer-reviewed research & policy work",
                  expanded=True):
     st.markdown(
+        "- Jin, I. (2023). *Probability of Achieving NDC and Implications for "
+        "Climate Policy: CO-STIRPAT Approach.* Journal of Economic Analysis, "
+        "2(4), 38. "
+        "[doi:10.58567/jea02040005]"
+        "(https://doi.org/10.58567/jea02040005)\n"
         "- Jin, I. (2024). *Emission Prediction, Global Stocktake, and NDC "
         "Update: CO-STIRPAT Dynamic System.* Green and Low-Carbon Economy, "
         "3(3), 213–219. "
@@ -119,6 +124,14 @@ except Exception:        # noqa
 
 if "wallet" not in st.session_state:
     st.session_state.wallet = _cfg("COSTIRPAT_WALLET", "") or None
+
+# Always-visible copyright (sidebar shows regardless of where the app stops)
+st.sidebar.markdown(
+    "<div style='color:gray; font-size:0.8em;'>"
+    "© 2026 MT1308. All rights reserved."
+    "</div>",
+    unsafe_allow_html=True,
+)
 
 with st.sidebar.expander("🔐 NFT license", expanded=nft_gate_on):
     if nft_gate_on:
@@ -336,4 +349,12 @@ st.caption(
     f"2026-{int(shock_window)} · real shock {data['shock_real_tr']:.2f} tr "
     f"(÷ inflation {data['shock_infl']:.3f}) · benefit total "
     f"{data['benefit_total']:.1f}, cost total {data['cost_total']:.1f} tr KRW."
+)
+
+st.divider()
+st.markdown(
+    "<div style='text-align:center; color:gray; font-size:0.85em;'>"
+    "© 2026 MT1308. All rights reserved."
+    "</div>",
+    unsafe_allow_html=True,
 )
