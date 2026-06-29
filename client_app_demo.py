@@ -19,7 +19,9 @@
 # ===========================================================================
 
 import os
+import io
 import requests
+import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
@@ -42,6 +44,139 @@ API_KEY = _cfg("COSTIRPAT_API_KEY", "")
 # Endpoint path: "/simulate" (default) or "/api/v1/simulate" — both work server-side.
 API_PATH = _cfg("COSTIRPAT_API_PATH", "/simulate")
 TIMEOUT = 60
+
+
+def build_excel(data, shock_nominal_tr, shock_window, carbon_rate_2050):
+    """Serialise the real result series into an .xlsx byte stream in memory."""
+    years = data["years"]
+    paths = {"Year": years}
+    for key, col in [
+        ("emis_base", "Emissions_baseline_MtCO2"),
+        ("emis_alte", "Emissions_green_MtCO2"),
+        ("gdp_base", "RealGDP_baseline_trKRW"),
+        ("gdp_alte", "RealGDP_green_trKRW"),
+        ("gdp_ratio_base", "GDP_index_baseline"),
+        ("gdp_ratio_alte", "GDP_index_green"),
+        ("debt_gdp_base", "DebtToGDP_baseline_pct"),
+        ("debt_gdp_alte", "DebtToGDP_green_pct"),
+    ]:
+        series = data.get(key)
+        if series and len(series) == len(years):
+            paths[col] = series
+    df_paths = pd.DataFrame(paths).set_index("Year")
+
+    cps = data.get("component_paths") or {}
+    df_comp = None
+    if cps:
+        comp_cols = {"Year": years}
+        for i in range(1, 7):
+            k = f"comp{i}"
+            if k in cps and len(cps[k]) == len(years):
+                comp_cols[f"Comp{i}_annual_trKRW"] = cps[k]
+        df_comp = pd.DataFrame(comp_cols).set_index("Year")
+
+    df_summary = pd.DataFrame({
+        "Metric": ["Green investment shock (tr KRW/yr)",
+                   "Shock window end year",
+                   "2050 carbon-price target (KRW/tCO2)",
+                   "Benefit/|Cost| ratio (BCR)",
+                   "Benefit total (tr KRW)",
+                   "Cost total (tr KRW)",
+                   "Net benefit (tr KRW)"],
+        "Value": [shock_nominal_tr, int(shock_window), int(carbon_rate_2050),
+                  round(data["bcr"], 4), round(data["benefit_total"], 2),
+                  round(data["cost_total"], 2),
+                  round(data["benefit_total"] - data["cost_total"], 2)],
+    })
+    df_pv = pd.DataFrame([
+        {"Component": c["component"], "Type": c["type"],
+         "PV_trKRW": round(c["pv_tr"], 3)} for c in data["components"]
+    ])
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df_summary.to_excel(writer, sheet_name="Summary", index=False)
+        df_pv.to_excel(writer, sheet_name="Component_PV", index=False)
+        df_paths.to_excel(writer, sheet_name="Annual_paths")
+        if df_comp is not None:
+            df_comp.to_excel(writer, sheet_name="Component_paths")
+    buffer.seek(0)
+    return buffer
+
+
+def build_pdf(data, shock_nominal_tr, shock_window, carbon_rate_2050):
+    """One-page English PDF summary (no non-Latin fonts → no font registration)."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                    Table, TableStyle)
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib import colors
+
+    net_benefit = data["benefit_total"] - data["cost_total"]
+    pdf_buffer = io.BytesIO()
+    doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=40,
+                            leftMargin=40, topMargin=48, bottomMargin=40)
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph("<b>CO-STIRPAT Climate-Fiscal Evaluation Report</b>",
+                  styles["Title"]),
+        Spacer(1, 16),
+        Paragraph("Issued by MT1308 — CO-STIRPAT Dynamic System", styles["Normal"]),
+        Spacer(1, 14),
+    ]
+    rows = [
+        ["Parameter / Metric", "Value"],
+        ["Green investment shock", f"{shock_nominal_tr} trillion KRW / yr"],
+        ["Shock window", f"2026-{int(shock_window)}"],
+        ["2050 carbon-price target", f"{int(carbon_rate_2050):,} KRW / tCO2"],
+        ["Benefit / |Cost| ratio (BCR)", f"{data['bcr']:.3f}"],
+        ["Benefit total (PV)", f"{data['benefit_total']:,.1f} trillion KRW"],
+        ["Cost total (PV)", f"{data['cost_total']:,.1f} trillion KRW"],
+        ["Net benefit (PV)", f"{net_benefit:,.1f} trillion KRW"],
+    ]
+    table = Table(rows, colWidths=[250, 230])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1B5E20")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#F4F8F4")),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 18))
+
+    comp_rows = [["Component", "Type", "PV (tr KRW)"]]
+    for c in data["components"]:
+        comp_rows.append([c["component"], c["type"], f"{c['pv_tr']:.2f}"])
+    comp_table = Table(comp_rows, colWidths=[230, 120, 130])
+    comp_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2E7D55")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#F8F9F9")),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(Paragraph("<b>Six fiscal cost components (present value)</b>",
+                           styles["Heading4"]))
+    story.append(Spacer(1, 6))
+    story.append(comp_table)
+    story.append(Spacer(1, 24))
+    story.append(Paragraph(
+        "© 2026 MT1308. All rights reserved. Generated by the CO-STIRPAT "
+        "simulator; figures are model estimates for the specified scenario.",
+        styles["Italic"]))
+    doc.build(story)
+    pdf_buffer.seek(0)
+    return pdf_buffer
+
+
 
 st.set_page_config(layout="wide", page_title="CO-STIRPAT Dynamic System")
 st.title("🌿 CO-STIRPAT Climate-Fiscal Dynamic Simulator")
@@ -107,6 +242,20 @@ carbon_rate_2050 = st.sidebar.slider(
     min_value=50000, max_value=400000, value=300000, step=10000,
     help="Scales the ETS missed-target penalty (Comp3). Higher price → "
          "larger fiscal cost of missing NDC targets.")
+
+# --- Scenario manager: save the current run to compare several scenarios ---
+if "scenarios" not in st.session_state:
+    st.session_state.scenarios = {}      # name -> {label, emis_alte, gdp_alte, ...}
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("📋 Scenario Manager")
+scenario_name = st.sidebar.text_input(
+    "Scenario name", value="Aggressive carbon price")
+save_clicked = st.sidebar.button("💾 Save current scenario")
+if st.session_state.scenarios:
+    if st.sidebar.button("🗑️ Clear all scenarios"):
+        st.session_state.scenarios.clear()
+        st.rerun()
 
 EXPECTED_BUILD = "2025-06-26-engine-v9d"
 
@@ -225,6 +374,21 @@ except Exception as e:        # noqa
 
 years = data["years"]
 
+# Persist the current run if the user clicked "Save current scenario".
+if save_clicked:
+    nm = (scenario_name or "Scenario").strip() or "Scenario"
+    st.session_state.scenarios[nm] = {
+        "shock_nominal_tr": shock_nominal_tr,
+        "shock_window": int(shock_window),
+        "carbon_rate_2050": int(carbon_rate_2050),
+        "bcr": data["bcr"],
+        "benefit_total": data["benefit_total"],
+        "cost_total": data["cost_total"],
+        "emis_alte": data.get("emis_alte", []),
+        "gdp_ratio_alte": data.get("gdp_ratio_alte", []),
+    }
+    st.sidebar.success(f"Saved '{nm}'.")
+
 # ---- shared chart styling ------------------------------------------------
 GREY = "#7F8C8D"
 GREEN = "#2ECC71"
@@ -290,6 +454,26 @@ with tab_emis:
         )
     else:
         st.info("Emission series not available from the server.")
+
+    # Multi-scenario overlay (only the green path of each saved scenario)
+    if st.session_state.scenarios:
+        st.markdown("##### Saved-scenario comparison")
+        fig_multi = go.Figure()
+        if data.get("emis_base"):
+            fig_multi.add_trace(go.Scatter(
+                x=years, y=data["emis_base"], name="Baseline",
+                line=dict(color=GREY, width=2, dash="dash")))
+        for nm, sc in st.session_state.scenarios.items():
+            if sc.get("emis_alte"):
+                label = (f"{nm} ({sc['shock_nominal_tr']}tr, "
+                         f"{sc['carbon_rate_2050']:,}/tCO₂)")
+                fig_multi.add_trace(go.Scatter(
+                    x=years, y=sc["emis_alte"], mode="lines+markers",
+                    name=label, marker=dict(size=4)))
+        style_layout(fig_multi, "Emissions (MtCO₂)", height=420)
+        st.plotly_chart(fig_multi, use_container_width=True)
+        st.caption("Each line is a scenario you saved (sidebar → Save). "
+                   "Use 'Clear all scenarios' to reset.")
 
 # ---- Tab 2: Six fiscal cost components -----------------------------------
 with tab_cost:
@@ -448,6 +632,36 @@ st.caption(
     f"benefit total {data['benefit_total']:.1f}, cost total "
     f"{data['cost_total']:.1f} tr KRW."
 )
+
+# ----------------- Export: Excel data + PDF summary report -----------------
+st.divider()
+st.subheader("⬇️ Export results")
+exp1, exp2 = st.columns(2)
+with exp1:
+    try:
+        xlsx_bytes = build_excel(data, shock_nominal_tr, shock_window,
+                                 carbon_rate_2050)
+        st.download_button(
+            "📊 Download Excel (full series)",
+            data=xlsx_bytes,
+            file_name="MT1308_CO-STIRPAT_results.xlsx",
+            mime=("application/vnd.openxmlformats-officedocument."
+                  "spreadsheetml.sheet"),
+            use_container_width=True)
+    except Exception as e:        # noqa
+        st.caption(f"Excel export unavailable: {e}")
+with exp2:
+    try:
+        pdf_bytes = build_pdf(data, shock_nominal_tr, shock_window,
+                              carbon_rate_2050)
+        st.download_button(
+            "📄 Download PDF summary report",
+            data=pdf_bytes,
+            file_name="CO-STIRPAT_Fiscal_Report.pdf",
+            mime="application/pdf",
+            use_container_width=True)
+    except Exception as e:        # noqa
+        st.caption(f"PDF export unavailable: {e}")
 
 st.divider()
 st.markdown(
