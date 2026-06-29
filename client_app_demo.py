@@ -194,8 +194,10 @@ if nft_gate_on and not user_wallet:
 
 # ----------------- Call server & render -----------------
 try:
-    data = call_simulate(int(shock_nominal_tr), 2026, int(shock_window),
-                         user_wallet=user_wallet)
+    with st.spinner("🔄 Running CO-STIRPAT dynamic simulation — solving the "
+                    "non-linear system and decomposing fiscal components…"):
+        data = call_simulate(int(shock_nominal_tr), 2026, int(shock_window),
+                             user_wallet=user_wallet)
 except requests.HTTPError as e:        # noqa
     code = e.response.status_code if e.response is not None else None
     if code == 403:
@@ -215,134 +217,194 @@ except Exception as e:        # noqa
 
 years = data["years"]
 
-# Single-column layout: table on top, then the four charts stacked vertically.
-st.subheader("📊 Six Fiscal Cost Components")
-bcr = data["bcr"]
-cost_total = data.get("cost_total", 0.0)
-if cost_total == 0:
-    st.metric("Benefit / |Cost| Ratio", "n/a",
-              delta="no shock applied")
-else:
-    st.metric("Benefit / |Cost| Ratio", f"{bcr:.3f}",
-              delta=f"{bcr - 1.0:+.3f} (vs break-even)")
-st.table([
-    {"Component": c["component"], "Type": c["type"],
-     "PV (Tr KRW)": round(c["pv_tr"], 2)}
-    for c in data["components"]
+# ---- shared chart styling ------------------------------------------------
+GREY = "#7F8C8D"
+GREEN = "#2ECC71"
+BLUE = "#3498DB"
+RED = "#E74C3C"
+
+
+def style_layout(fig, y_title, height=380):
+    """Apply a clean, professional theme shared by all line charts."""
+    fig.update_layout(
+        hovermode="x unified",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        height=height,
+        margin=dict(l=40, r=30, t=30, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1),
+        xaxis=dict(showgrid=True, gridcolor="rgba(189,195,199,0.3)",
+                   tickmode="linear", dtick=5),
+        yaxis=dict(showgrid=True, gridcolor="rgba(189,195,199,0.3)",
+                   title=y_title, zeroline=False),
+    )
+    return fig
+
+
+def gap_line_chart(yb, ya, y_title, base_name="Baseline",
+                   alte_name="Green Investment", fill=True, height=380):
+    """Two-path line chart; shades the gap between the paths with tonexty."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=years, y=yb, mode="lines", name=base_name,
+        line=dict(color=GREY, width=2, dash="dash"),
+        hovertemplate="%{y:.3f}"))
+    fig.add_trace(go.Scatter(
+        x=years, y=ya, mode="lines", name=alte_name,
+        line=dict(color=GREEN, width=3),
+        fill="tonexty" if fill else None,
+        fillcolor="rgba(46,204,113,0.15)",
+        hovertemplate="%{y:.3f}"))
+    return style_layout(fig, y_title, height)
+
+
+# ============================ TABS ========================================
+tab_emis, tab_cost, tab_macro = st.tabs([
+    "📈 Emissions & NDC Path",
+    "📊 Six Fiscal Cost Components",
+    "🏛️ Macro & Debt Sustainability",
 ])
 
-st.subheader("📈 Macro-Fiscal Paths")
-
-# The notebook (plot_scenario_comparison) plots the normalised gdpr_f ratio
-# (2018 = 1). Default to that so the chart matches the notebook analysis;
-# offer a toggle to view the trillion-KRW level.
-gdp_mode = st.radio(
-    "Real GDP display",
-    ["Normalised index (2018=1) — matches notebook",
-     "Level (trillion KRW)"],
-    horizontal=True, index=0, label_visibility="collapsed")
-
-# Resilient to older server responses that may not include the ratio
-# series: derive the index from the level if needed.
-gdpr_2018 = data.get("gdpr_2018")
-ratio_base = data.get("gdp_ratio_base")
-ratio_alte = data.get("gdp_ratio_alte")
-if ratio_base is None or ratio_alte is None:
-    if gdpr_2018:
-        ratio_base = [v / gdpr_2018 for v in data["gdp_base"]]
-        ratio_alte = [v / gdpr_2018 for v in data["gdp_alte"]]
+# ---- Tab 1: Emissions ----------------------------------------------------
+with tab_emis:
+    st.subheader("Carbon Emissions Path (2025–2050)")
+    if data.get("emis_base"):
+        fig_emis = gap_line_chart(
+            data["emis_base"], data["emis_alte"],
+            "Emissions (MtCO₂)", height=420)
+        st.plotly_chart(fig_emis, use_container_width=True)
+        gap_2050 = data["emis_base"][-1] - data["emis_alte"][-1]
+        st.caption(
+            f"Shaded area = emissions avoided by green investment. "
+            f"By 2050 the green path is {gap_2050:.1f} MtCO₂ below baseline "
+            f"({data['emis_base'][-1]:.1f} → {data['emis_alte'][-1]:.1f})."
+        )
     else:
-        # last-resort: normalise each series to its own first value
-        b0 = data["gdp_base"][0] if data["gdp_base"] else 1.0
-        a0 = data["gdp_alte"][0] if data["gdp_alte"] else 1.0
-        ratio_base = [v / b0 for v in data["gdp_base"]]
-        ratio_alte = [v / a0 for v in data["gdp_alte"]]
+        st.info("Emission series not available from the server.")
 
-# Sanity guard: the 2025 real-GDP index should sit near ~1.1-1.4 (2018=1).
-# A first point far outside that band (e.g. a spike to ~20 that then
-# collapses) means the simulation server returned stale/garbage output —
-# almost always an old server process from before the engine fixes.
-if ratio_base and (ratio_base[0] > 3.0 or ratio_base[0] <= 0):
-    st.warning(
-        f"Real GDP index starts at {ratio_base[0]:.1f} (expected ≈1.1-1.4). "
-        "This indicates the simulation server is running an outdated build. "
-        "Restart the server (Ctrl+C, then `uvicorn server:app --host 0.0.0.0 "
-        "--port 8000`) and refresh."
+# ---- Tab 2: Six fiscal cost components -----------------------------------
+with tab_cost:
+    st.subheader("Six Fiscal Cost Components (OECD EDISON basis)")
+    bcr = data["bcr"]
+    cost_total = data.get("cost_total", 0.0)
+    if cost_total == 0:
+        st.metric("Benefit / |Cost| Ratio", "n/a", delta="no shock applied")
+    else:
+        st.metric("Benefit / |Cost| Ratio", f"{bcr:.3f}",
+                  delta=f"{bcr - 1.0:+.3f} (vs break-even)")
+
+    # Waterfall of present values (real server data, not hard-coded)
+    comps = data["components"]
+    labels = [c["component"] for c in comps]
+    pvs = [float(c["pv_tr"]) for c in comps]
+    fig_wf = go.Figure(go.Waterfall(
+        orientation="v",
+        measure=["relative"] * len(pvs) + ["total"],
+        x=labels + ["Net Benefit"],
+        y=pvs + [0],
+        text=[(f"+{v:.1f}" if v >= 0 else f"{v:.1f}") for v in pvs] + ["Sum"],
+        textposition="outside",
+        connector={"line": {"color": GREY}},
+        increasing={"marker": {"color": GREEN}},
+        decreasing={"marker": {"color": RED}},
+        totals={"marker": {"color": BLUE}},
+    ))
+    fig_wf.update_layout(
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        height=420, margin=dict(l=20, r=20, t=30, b=80),
+        yaxis=dict(title="Present value (trillion KRW)", zeroline=True,
+                   zerolinecolor="rgba(127,140,141,0.5)"),
+        xaxis=dict(tickangle=-30),
     )
+    st.plotly_chart(fig_wf, use_container_width=True)
 
-if gdp_mode.startswith("Level"):
-    y_base, y_alte = data["gdp_base"], data["gdp_alte"]
-    y_title = "Real GDP (trillion KRW, 2018 base)"
-else:
-    y_base, y_alte = ratio_base, ratio_alte
-    y_title = "Real GDP index (gdpr, 2018 = 1)"
+    # Per-year stacked detail + reference table
+    cpaths = data.get("component_paths")
+    if cpaths:
+        comp_meta = [
+            ("comp1", "Comp1 Indirect macro", "#2e7d32"),
+            ("comp2", "Comp2 Weather damage", "#66bb6a"),
+            ("comp3", "Comp3 Missed target",  "#a5d6a7"),
+            ("comp4", "Comp4 Health",         "#1565c0"),
+            ("comp5", "Comp5 Lost tax",       "#ef6c00"),
+            ("comp6", "Comp6 Expenditure",    "#c62828"),
+        ]
+        fig_stack = go.Figure()
+        for key, label, color in comp_meta:
+            if key in cpaths:
+                fig_stack.add_trace(go.Bar(
+                    x=years, y=cpaths[key], name=label, marker_color=color))
+        fig_stack.update_layout(
+            barmode="relative",
+            title="Annual contribution by component",
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            xaxis_title="Year", yaxis_title="Annual value (trillion KRW)",
+            height=380, margin=dict(l=20, r=20, t=40, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.3))
+        st.plotly_chart(fig_stack, use_container_width=True)
 
-# Chart 1: Real GDP path
-fig_gdp = go.Figure()
-fig_gdp.add_trace(go.Scatter(x=years, y=y_base, name="Baseline",
-                             line=dict(color="gray", dash="dash")))
-fig_gdp.add_trace(go.Scatter(x=years, y=y_alte,
-                             name="Green Investment",
-                             line=dict(color="green", width=3)))
-fig_gdp.update_layout(
-    title="Real GDP Path (2025-2050)", xaxis_title="Year",
-    yaxis_title=y_title,
-    height=360, margin=dict(l=10, r=10, t=40, b=10))
-st.plotly_chart(fig_gdp, use_container_width=True)
+    st.table([
+        {"Component": c["component"], "Type": c["type"],
+         "PV (Tr KRW)": round(c["pv_tr"], 2)}
+        for c in comps
+    ])
 
-# Chart 2: Public Debt-to-GDP ratio
-if data["debt_gdp_base"]:
-    fig_d2g = go.Figure()
-    fig_d2g.add_trace(go.Scatter(x=years, y=data["debt_gdp_base"],
-                                 name="Baseline",
-                                 line=dict(color="gray", dash="dash")))
-    fig_d2g.add_trace(go.Scatter(x=years, y=data["debt_gdp_alte"],
-                                 name="Green Investment",
-                                 line=dict(color="blue", width=3)))
-    fig_d2g.update_layout(
-        title="Public Debt-to-GDP Ratio (2025-2050)", xaxis_title="Year",
-        yaxis_title="Debt / GDP (%)",
-        height=360, margin=dict(l=10, r=10, t=40, b=10))
-    st.plotly_chart(fig_d2g, use_container_width=True)
+# ---- Tab 3: Macro & debt -------------------------------------------------
+with tab_macro:
+    st.subheader("Real GDP Path (2025–2050)")
+    gdp_mode = st.radio(
+        "Real GDP display",
+        ["Normalised index (2018=1) — matches notebook",
+         "Level (trillion KRW)"],
+        horizontal=True, index=0, label_visibility="collapsed")
 
-# Chart 3: Six fiscal cost components, stacked by year
-cpaths = data.get("component_paths")
-if cpaths:
-    comp_meta = [
-        ("comp1", "Comp1 Indirect macro", "#2e7d32"),
-        ("comp2", "Comp2 Weather damage", "#66bb6a"),
-        ("comp3", "Comp3 Missed target",  "#a5d6a7"),
-        ("comp4", "Comp4 Health",         "#1565c0"),
-        ("comp5", "Comp5 Lost tax",       "#ef6c00"),
-        ("comp6", "Comp6 Expenditure",    "#c62828"),
-    ]
-    fig_stack = go.Figure()
-    for key, label, color in comp_meta:
-        if key in cpaths:
-            fig_stack.add_trace(go.Bar(
-                x=years, y=cpaths[key], name=label, marker_color=color))
-    fig_stack.update_layout(
-        barmode="relative",   # stacks positives up, negatives down
-        title="Six Fiscal Cost Components, Stacked by Year",
-        xaxis_title="Year", yaxis_title="Annual value (trillion KRW)",
-        height=400, margin=dict(l=10, r=10, t=40, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3))
-    st.plotly_chart(fig_stack, use_container_width=True)
+    gdpr_2018 = data.get("gdpr_2018")
+    ratio_base = data.get("gdp_ratio_base")
+    ratio_alte = data.get("gdp_ratio_alte")
+    if ratio_base is None or ratio_alte is None:
+        if gdpr_2018:
+            ratio_base = [v / gdpr_2018 for v in data["gdp_base"]]
+            ratio_alte = [v / gdpr_2018 for v in data["gdp_alte"]]
+        else:
+            b0 = data["gdp_base"][0] if data["gdp_base"] else 1.0
+            a0 = data["gdp_alte"][0] if data["gdp_alte"] else 1.0
+            ratio_base = [v / b0 for v in data["gdp_base"]]
+            ratio_alte = [v / a0 for v in data["gdp_alte"]]
 
-# Chart 4: Emission path (MtCO2)
-if data.get("emis_base"):
-    fig_emis = go.Figure()
-    fig_emis.add_trace(go.Scatter(x=years, y=data["emis_base"],
-                                  name="Baseline",
-                                  line=dict(color="gray", dash="dash")))
-    fig_emis.add_trace(go.Scatter(x=years, y=data["emis_alte"],
-                                  name="Green Investment",
-                                  line=dict(color="green", width=3)))
-    fig_emis.update_layout(
-        title="Carbon Emissions Path (2025-2050)", xaxis_title="Year",
-        yaxis_title="Emissions (MtCO₂)",
-        height=360, margin=dict(l=10, r=10, t=40, b=10))
-    st.plotly_chart(fig_emis, use_container_width=True)
+    if ratio_base and (ratio_base[0] > 3.0 or ratio_base[0] <= 0):
+        st.warning(
+            f"Real GDP index starts at {ratio_base[0]:.1f} (expected ≈1.1-1.4). "
+            "The simulation server may be running an outdated build. "
+            "Restart it and refresh."
+        )
+
+    if gdp_mode.startswith("Level"):
+        y_base, y_alte = data["gdp_base"], data["gdp_alte"]
+        y_title = "Real GDP (trillion KRW, 2018 base)"
+    else:
+        y_base, y_alte = ratio_base, ratio_alte
+        y_title = "Real GDP index (gdpr, 2018 = 1)"
+
+    fig_gdp = gap_line_chart(y_base, y_alte, y_title)
+    st.plotly_chart(fig_gdp, use_container_width=True)
+
+    if data["debt_gdp_base"]:
+        st.subheader("Public Debt-to-GDP Ratio (2025–2050)")
+        # Lower debt is better, so colour the green path blue and shade the gap.
+        fig_d2g = go.Figure()
+        fig_d2g.add_trace(go.Scatter(
+            x=years, y=data["debt_gdp_base"], mode="lines", name="Baseline",
+            line=dict(color=GREY, width=2, dash="dash"),
+            hovertemplate="%{y:.1f}%"))
+        fig_d2g.add_trace(go.Scatter(
+            x=years, y=data["debt_gdp_alte"], mode="lines",
+            name="Green Investment",
+            line=dict(color=BLUE, width=3),
+            fill="tonexty", fillcolor="rgba(52,152,219,0.12)",
+            hovertemplate="%{y:.1f}%"))
+        style_layout(fig_d2g, "Debt / GDP (%)")
+        st.plotly_chart(fig_d2g, use_container_width=True)
 
 st.caption(
     f"Scenario: {shock_nominal_tr} tr KRW/yr nominal shock over "
