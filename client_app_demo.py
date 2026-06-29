@@ -232,6 +232,46 @@ def call_simulate(shock_nominal_tr, shock_year_b, shock_year_e,
 
 
 # ----------------- Sidebar controls -----------------
+# --- Global scalability: country selector ---------------------------------
+# Only Korea is a live, calibrated model (private server + estimated data).
+# Other countries are shown as placeholders to demonstrate that the
+# architecture is multi-country ready, WITHOUT presenting un-calibrated
+# (fake) results as if they were real.
+COUNTRIES = {
+    "🇰🇷 Korea": {
+        "status": "live",
+        "currency": "trillion KRW",
+    },
+    "🇻🇳 Vietnam": {
+        "status": "coming_soon",
+        "currency": "billion USD",
+    },
+    "🇮🇩 Indonesia": {
+        "status": "coming_soon",
+        "currency": "billion USD",
+    },
+}
+
+st.sidebar.title("🌐 Global Climate-Fiscal Simulator")
+selected_country = st.sidebar.selectbox(
+    "Target country", list(COUNTRIES.keys()), index=0)
+country_cfg = COUNTRIES[selected_country]
+country_status = country_cfg["status"]
+country_currency = country_cfg["currency"]
+
+if country_status == "live":
+    st.sidebar.success(
+        f"📊 Active model: **{selected_country}** · unit: {country_currency}")
+else:
+    st.sidebar.warning(
+        f"🚧 **{selected_country}** — model not yet calibrated. "
+        "The dashboard below shows the live Korea model.")
+st.sidebar.caption(
+    "Vietnam / Indonesia are placeholders. A country-specific calibration "
+    "module (local NDC targets, re-estimated parameters) is on the roadmap; "
+    "no un-calibrated results are shown.")
+st.sidebar.markdown("---")
+
 st.sidebar.header("🕹️ Scenario Controls")
 shock_nominal_tr = st.sidebar.slider(
     "Green investment shock (trillion KRW / yr)", 0, 30, 10, step=5)
@@ -432,6 +472,13 @@ def gap_line_chart(yb, ya, y_title, base_name="Baseline",
 
 
 # ============================ TABS ========================================
+if country_status != "live":
+    st.info(
+        f"🚧 **{selected_country} is a roadmap placeholder.** "
+        f"The charts below show the live, calibrated **Korea** model. "
+        f"A {selected_country} module (local NDC targets and re-estimated "
+        "parameters) is planned — results are not yet available.")
+
 tab_emis, tab_cost, tab_macro = st.tabs([
     "📈 Emissions & NDC Path",
     "📊 Six Fiscal Cost Components",
