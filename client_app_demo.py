@@ -77,7 +77,8 @@ with st.expander("📚 References — peer-reviewed research & policy work",
 # ---------------------------------------------------------------------------
 # API call (the only thing this client does besides drawing)
 # ---------------------------------------------------------------------------
-def call_simulate(shock_nominal_tr, shock_year_b, shock_year_e, user_wallet=None):
+def call_simulate(shock_nominal_tr, shock_year_b, shock_year_e,
+                  carbon_rate_2050=300000, user_wallet=None):
     headers = {"Content-Type": "application/json"}
     if API_KEY:
         headers["X-API-Key"] = API_KEY
@@ -85,6 +86,7 @@ def call_simulate(shock_nominal_tr, shock_year_b, shock_year_e, user_wallet=None
         "shock_nominal_tr": shock_nominal_tr,
         "shock_year_b": shock_year_b,
         "shock_year_e": shock_year_e,
+        "carbon_rate_2050": carbon_rate_2050,
     }
     if user_wallet:                       # only sent when the NFT gate is in use
         payload["user_wallet"] = user_wallet
@@ -100,8 +102,13 @@ shock_nominal_tr = st.sidebar.slider(
     "Green investment shock (trillion KRW / yr)", 0, 30, 10, step=5)
 shock_window = st.sidebar.select_slider(
     "Shock window (end year)", options=[2028, 2030, 2032, 2035], value=2030)
+carbon_rate_2050 = st.sidebar.slider(
+    "2050 carbon-price target (KRW / tCO₂)",
+    min_value=50000, max_value=400000, value=300000, step=10000,
+    help="Scales the ETS missed-target penalty (Comp3). Higher price → "
+         "larger fiscal cost of missing NDC targets.")
 
-EXPECTED_BUILD = "2025-06-26-engine-v9c"
+EXPECTED_BUILD = "2025-06-26-engine-v9d"
 
 # --- Probe server health first: tells us whether the NFT gate is enforced ---
 server_health = {}
@@ -197,6 +204,7 @@ try:
     with st.spinner("🔄 Running CO-STIRPAT dynamic simulation — solving the "
                     "non-linear system and decomposing fiscal components…"):
         data = call_simulate(int(shock_nominal_tr), 2026, int(shock_window),
+                             carbon_rate_2050=int(carbon_rate_2050),
                              user_wallet=user_wallet)
 except requests.HTTPError as e:        # noqa
     code = e.response.status_code if e.response is not None else None
@@ -322,13 +330,14 @@ with tab_cost:
     # Per-year stacked detail + reference table
     cpaths = data.get("component_paths")
     if cpaths:
+        # Notebook-synced component palette (OECD EDISON six-component colours).
         comp_meta = [
-            ("comp1", "Comp1 Indirect macro", "#2e7d32"),
-            ("comp2", "Comp2 Weather damage", "#66bb6a"),
-            ("comp3", "Comp3 Missed target",  "#a5d6a7"),
-            ("comp4", "Comp4 Health",         "#1565c0"),
-            ("comp5", "Comp5 Lost tax",       "#ef6c00"),
-            ("comp6", "Comp6 Expenditure",    "#c62828"),
+            ("comp1", "Comp1 Indirect macro", "#5B7FA6"),
+            ("comp2", "Comp2 Weather damage", "#C0533A"),
+            ("comp3", "Comp3 Missed target",  "#C62A47"),
+            ("comp4", "Comp4 Health",         "#8B4A8B"),
+            ("comp5", "Comp5 Lost tax",       "#C89A00"),
+            ("comp6", "Comp6 Expenditure",    "#2E7D55"),
         ]
         fig_stack = go.Figure()
         for key, label, color in comp_meta:
@@ -352,6 +361,31 @@ with tab_cost:
 
 # ---- Tab 3: Macro & debt -------------------------------------------------
 with tab_macro:
+    st.subheader("Key Fiscal-Sustainability Indicators (2050)")
+
+    # KPI row — all values come from the real server response.
+    net_benefit = data["benefit_total"] - data["cost_total"]
+    ratio_b = data.get("gdp_ratio_base") or []
+    ratio_a = data.get("gdp_ratio_alte") or []
+    if ratio_b and ratio_a:
+        gdp_2050_alte = ratio_a[-1]
+        gdp_diff_pp = (ratio_a[-1] - ratio_b[-1]) * 100.0
+    else:
+        gdp_2050_alte, gdp_diff_pp = float("nan"), 0.0
+
+    bcr_val = data["bcr"]
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        st.metric("Net Benefit (PV)", f"{net_benefit:,.1f} tr KRW",
+                  delta=f"vs {shock_nominal_tr} tr/yr investment")
+    with k2:
+        status = "🎯 favourable" if bcr_val > 1.0 else "⚠️ below break-even"
+        st.metric("Benefit / |Cost| Ratio", f"{bcr_val:.3f}", delta=status)
+    with k3:
+        st.metric("Real GDP index 2050 (green)", f"{gdp_2050_alte:.4f}",
+                  delta=f"{gdp_diff_pp:+.2f} pp vs baseline")
+
+    st.divider()
     st.subheader("Real GDP Path (2025–2050)")
     gdp_mode = st.radio(
         "Real GDP display",
@@ -408,9 +442,11 @@ with tab_macro:
 
 st.caption(
     f"Scenario: {shock_nominal_tr} tr KRW/yr nominal shock over "
-    f"2026-{int(shock_window)} · real shock {data['shock_real_tr']:.2f} tr "
-    f"(÷ inflation {data['shock_infl']:.3f}) · benefit total "
-    f"{data['benefit_total']:.1f}, cost total {data['cost_total']:.1f} tr KRW."
+    f"2026-{int(shock_window)} · 2050 carbon-price target "
+    f"{int(carbon_rate_2050):,} KRW/tCO₂ · real shock "
+    f"{data['shock_real_tr']:.2f} tr (÷ inflation {data['shock_infl']:.3f}) · "
+    f"benefit total {data['benefit_total']:.1f}, cost total "
+    f"{data['cost_total']:.1f} tr KRW."
 )
 
 st.divider()
